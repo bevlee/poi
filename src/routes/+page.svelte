@@ -3,7 +3,7 @@
 	import Map from '$lib/components/Map.svelte';
 	import { searchAddress } from '$lib/nominatim.js';
 	import { fetchMatrix, formatDuration, formatDistance, googleMapsTransitUrl } from '$lib/ors.js';
-	import { createStore } from '$lib/store.js';
+	import { createStore } from '$lib/store.svelte.js';
 
 	let store;
 	let mounted = $state(false);
