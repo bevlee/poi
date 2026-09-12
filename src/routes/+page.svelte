@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import Map from '$lib/components/Map.svelte';
 	import { searchAddress } from '$lib/nominatim.js';
-	import { fetchMatrix, formatDuration, formatDistance, googleMapsTransitUrl } from '$lib/ors.js';
+	import { fetchRoutesFromPlace, formatDuration, formatDistance, googleMapsTransitUrl } from '$lib/ors.js';
 	import { createStore } from '$lib/store.svelte.js';
 
 	let store;
@@ -74,78 +74,54 @@
 		editingPlaceId = null;
 	}
 
-	// Matrix
-	let matrixProfile = $state('driving-car');
-	let matrixLoading = $state(false);
-	let matrixError = $state('');
-	let matrixResult = $state(null);
-	let matrixRowPlaces = $state([]);
-	let matrixColPlaces = $state([]);
-	let showDistances = $state(false);
+	// Compare from place
+	let compareProfile = $state('driving-car');
+	let comparePlaceId = $state(null);
+	let compareLoading = $state(false);
+	let compareError = $state('');
+	let compareRoutes = $state([]);
 
-	// Row/col group selection for matrix
-	let rowGroupIds = $state(new Set());
-	let colGroupIds = $state(new Set());
-
-	function toggleRowGroup(id) {
-		const next = new Set(rowGroupIds);
-		next.has(id) ? next.delete(id) : next.add(id);
-		rowGroupIds = next;
+	function getComparPlace() {
+		return store?.places.find(p => p.id === comparePlaceId) ?? null;
 	}
 
-	function toggleColGroup(id) {
-		const next = new Set(colGroupIds);
-		next.has(id) ? next.delete(id) : next.add(id);
-		colGroupIds = next;
-	}
+	async function compareFrom(place) {
+		if (!store.orsApiKey) { compareError = 'Set your ORS API key in Settings.'; return; }
 
-	async function generateMatrix() {
-		if (!store.orsApiKey) { matrixError = 'Set your ORS API key in Settings.'; return; }
+		comparePlaceId = place.id;
+		compareLoading = true;
+		compareError = '';
+		compareRoutes = [];
 
-		const rows = store.places.filter(p => rowGroupIds.has(p.groupId));
-		const cols = store.places.filter(p => colGroupIds.has(p.groupId));
-		if (rows.length === 0 || cols.length === 0) {
-			matrixError = 'Select at least one row group and one column group.';
+		const destinations = store.places.filter(p =>
+			p.id !== place.id &&
+			store.groups.find(g => g.id === p.groupId)?.enabled
+		);
+
+		if (destinations.length === 0) {
+			compareError = 'No other enabled places to compare against.';
+			compareLoading = false;
 			return;
 		}
 
-		matrixLoading = true;
-		matrixError = '';
-		matrixResult = null;
-
-		const allPlaces = [...rows, ...cols];
-		const coords = allPlaces.map(p => [p.longitude, p.latitude]);
-
-		const sources = rows.map((_, i) => i);
-		const destinations = rows.map((_, i) => i + rows.length).concat().slice(0, cols.length);
-		const destIndices = cols.map((_, i) => rows.length + i);
-
 		try {
-			const url = `https://api.openrouteservice.org/v2/matrix/${matrixProfile}`;
-			const res = await fetch(url, {
-				method: 'POST',
-				headers: {
-					'Authorization': store.orsApiKey,
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({
-					locations: coords,
-					sources: sources,
-					destinations: destIndices,
-					metrics: ['duration', 'distance']
-				})
-			});
-			if (!res.ok) {
-				const text = await res.text();
-				throw new Error(`ORS error ${res.status}: ${text}`);
-			}
-			matrixResult = await res.json();
-			matrixRowPlaces = rows;
-			matrixColPlaces = cols;
+			compareRoutes = await fetchRoutesFromPlace(store.orsApiKey, place, destinations, compareProfile);
+			compareRoutes.sort((a, b) => (a.duration ?? Infinity) - (b.duration ?? Infinity));
 		} catch (e) {
-			matrixError = e.message;
+			compareError = e.message;
 		}
-		matrixLoading = false;
+		compareLoading = false;
+	}
+
+	function clearCompare() {
+		comparePlaceId = null;
+		compareRoutes = [];
+		compareError = '';
+	}
+
+	async function recompare() {
+		const place = getComparPlace();
+		if (place) compareFrom(place);
 	}
 
 	// Export / Import
@@ -267,9 +243,16 @@
 
 				<div class="panel">
 					<h2>Places ({store.places.length})</h2>
+					<div class="profile-select">
+						<select bind:value={compareProfile}>
+							<option value="driving-car">Driving</option>
+							<option value="foot-walking">Walking</option>
+							<option value="cycling-regular">Cycling</option>
+						</select>
+					</div>
 					{#each store.places as place}
 						{@const group = store.groups.find(g => g.id === place.groupId)}
-						<div class="place-row">
+						<div class="place-row" class:place-focused={place.id === comparePlaceId}>
 							{#if editingPlaceId === place.id}
 								<input type="text" bind:value={editName} class="edit-input" />
 								<select bind:value={editGroupId}>
@@ -282,6 +265,13 @@
 							{:else}
 								<span class="colour-dot" style:background={group?.colour ?? '#999'}></span>
 								<span class="place-name" title={place.address}>{place.name}</span>
+								<button
+									class="small-btn compare-btn"
+									class:active={place.id === comparePlaceId}
+									onclick={() => place.id === comparePlaceId ? clearCompare() : compareFrom(place)}
+								>
+									{place.id === comparePlaceId ? 'Clear' : 'Compare'}
+								</button>
 								<button class="small-btn" onclick={() => startEdit(place)}>Edit</button>
 								<button class="small-btn delete-btn" onclick={() => store.deletePlace(place.id)}>x</button>
 							{/if}
@@ -291,95 +281,58 @@
 						<p class="empty">No places yet. Search to add some.</p>
 					{/if}
 				</div>
+
+				{#if comparePlaceId && (compareRoutes.length > 0 || compareLoading)}
+					{@const focusPlace = getComparPlace()}
+					<div class="panel compare-panel">
+						<div class="compare-header">
+							<h2>From: {focusPlace?.name ?? '...'}</h2>
+							<button class="small-btn" onclick={clearCompare}>Clear</button>
+						</div>
+						{#if compareLoading}
+							<p class="loading">Fetching routes...</p>
+						{:else}
+							<div class="route-list">
+								{#each compareRoutes as route}
+									{@const destGroup = store.groups.find(g => g.id === route.destination.groupId)}
+									<div class="route-item">
+										<span class="colour-dot" style:background={destGroup?.colour ?? '#999'}></span>
+										<span class="route-dest">{route.destination.name}</span>
+										{#if route.error}
+											<span class="route-error">Error</span>
+										{:else}
+											<span class="route-time">{formatDuration(route.duration)}</span>
+											<span class="route-dist">{formatDistance(route.distance)}</span>
+										{/if}
+										<a
+											class="transit-link"
+											href={googleMapsTransitUrl(focusPlace.latitude, focusPlace.longitude, route.destination.latitude, route.destination.longitude)}
+											target="_blank"
+											rel="noopener"
+											title="Google Maps transit"
+										>T</a>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</div>
 
 			<div class="map-area">
-				<Map places={store.places} groups={store.groups} bind:this={mapComponent} />
+				<Map
+					places={store.places}
+					groups={store.groups}
+					routes={compareRoutes}
+					focusPlaceId={comparePlaceId}
+					bind:this={mapComponent}
+				/>
 			</div>
 		</div>
 
-		<div class="matrix-section">
-			<h2>Distance Matrix</h2>
-			<div class="matrix-controls">
-				<div class="matrix-group-select">
-					<div>
-						<strong>Row groups:</strong>
-						{#each store.groups as g}
-							<label>
-								<input type="checkbox" checked={rowGroupIds.has(g.id)} onchange={() => toggleRowGroup(g.id)} />
-								{g.name}
-							</label>
-						{/each}
-					</div>
-					<div>
-						<strong>Column groups:</strong>
-						{#each store.groups as g}
-							<label>
-								<input type="checkbox" checked={colGroupIds.has(g.id)} onchange={() => toggleColGroup(g.id)} />
-								{g.name}
-							</label>
-						{/each}
-					</div>
-				</div>
-				<div class="matrix-options">
-					<select bind:value={matrixProfile}>
-						<option value="driving-car">Driving</option>
-						<option value="foot-walking">Walking</option>
-						<option value="cycling-regular">Cycling</option>
-					</select>
-					<label>
-						<input type="checkbox" bind:checked={showDistances} />
-						Show distances
-					</label>
-					<button onclick={generateMatrix} disabled={matrixLoading}>
-						{matrixLoading ? 'Calculating...' : 'Generate Matrix'}
-					</button>
-				</div>
-			</div>
-
-			{#if matrixError}
-				<div class="error">{matrixError}</div>
-			{/if}
-
-			{#if matrixResult}
-				<div class="matrix-table-wrapper">
-					<table class="matrix-table">
-						<thead>
-							<tr>
-								<th></th>
-								{#each matrixColPlaces as col}
-									<th>{col.name}</th>
-								{/each}
-							</tr>
-						</thead>
-						<tbody>
-							{#each matrixRowPlaces as row, ri}
-								<tr>
-									<td class="row-label">{row.name}</td>
-									{#each matrixColPlaces as col, ci}
-										{@const dur = matrixResult.durations?.[ri]?.[ci]}
-										{@const dist = matrixResult.distances?.[ri]?.[ci]}
-										<td class="matrix-cell">
-											<span class="duration">{formatDuration(dur)}</span>
-											{#if showDistances}
-												<span class="distance">{formatDistance(dist)}</span>
-											{/if}
-											<a
-												class="transit-link"
-												href={googleMapsTransitUrl(row.latitude, row.longitude, col.latitude, col.longitude)}
-												target="_blank"
-												rel="noopener"
-												title="Open in Google Maps (transit)"
-											>Transit</a>
-										</td>
-									{/each}
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-		</div>
+		{#if compareError}
+			<div class="error">{compareError}</div>
+		{/if}
 	</div>
 {/if}
 
@@ -517,7 +470,7 @@
 	}
 
 	.sidebar {
-		width: 280px;
+		width: 300px;
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
@@ -573,12 +526,29 @@
 		cursor: pointer;
 	}
 
+	.profile-select {
+		margin-bottom: 0.5rem;
+	}
+
+	.profile-select select {
+		width: 100%;
+		padding: 0.3rem;
+	}
+
 	.place-row {
 		display: flex;
 		align-items: center;
 		gap: 0.3rem;
-		padding: 0.2rem 0;
+		padding: 0.25rem 0.2rem;
 		font-size: 0.85rem;
+		border-radius: 4px;
+	}
+
+	.place-focused {
+		background: #eef6ff;
+		border: 1px solid #b3d4fc;
+		margin: 0 -0.2rem;
+		padding: 0.25rem 0.4rem;
 	}
 
 	.place-name {
@@ -604,6 +574,18 @@
 		border-radius: 3px;
 	}
 
+	.compare-btn {
+		background: #e8f4fd;
+		border-color: #90c5e8;
+		color: #1a6fa0;
+	}
+
+	.compare-btn.active {
+		background: #1a6fa0;
+		color: white;
+		border-color: #1a6fa0;
+	}
+
 	.delete-btn {
 		color: #c0392b;
 	}
@@ -622,86 +604,76 @@
 		border: 1px solid #ddd;
 	}
 
-	.matrix-section {
-		background: white;
-		border: 1px solid #ddd;
-		border-radius: 6px;
-		padding: 1rem;
+	.compare-panel {
+		border-color: #b3d4fc;
+		background: #f8fbff;
 	}
 
-	.matrix-controls {
+	.compare-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 0.5rem;
+	}
+
+	.compare-header h2 {
+		margin: 0;
+	}
+
+	.loading {
+		color: #888;
+		font-size: 0.85rem;
+		margin: 0;
+	}
+
+	.route-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
-		margin-bottom: 1rem;
+		gap: 0.3rem;
 	}
 
-	.matrix-group-select {
-		display: flex;
-		gap: 2rem;
-	}
-
-	.matrix-group-select label {
-		margin-right: 0.75rem;
-		font-size: 0.9rem;
-	}
-
-	.matrix-options {
+	.route-item {
 		display: flex;
 		align-items: center;
-		gap: 1rem;
+		gap: 0.4rem;
+		padding: 0.3rem 0;
+		font-size: 0.85rem;
+		border-bottom: 1px solid #e8eef4;
 	}
 
-	.matrix-options select {
-		padding: 0.4rem;
+	.route-item:last-child {
+		border-bottom: none;
 	}
 
-	.matrix-table-wrapper {
-		overflow-x: auto;
-	}
-
-	.matrix-table {
-		border-collapse: collapse;
-		width: 100%;
-	}
-
-	.matrix-table th,
-	.matrix-table td {
-		border: 1px solid #ddd;
-		padding: 0.5rem 0.75rem;
-		text-align: center;
+	.route-dest {
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.matrix-table th {
-		background: #f9f9f9;
-		font-size: 0.85rem;
+	.route-time {
+		font-weight: 700;
+		white-space: nowrap;
 	}
 
-	.row-label {
-		text-align: left;
-		font-weight: 600;
-		background: #f9f9f9;
-	}
-
-	.matrix-cell {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.15rem;
-	}
-
-	.duration {
-		font-weight: 600;
-	}
-
-	.distance {
-		font-size: 0.75rem;
+	.route-dist {
 		color: #888;
+		font-size: 0.75rem;
+		white-space: nowrap;
+	}
+
+	.route-error {
+		color: #c0392b;
+		font-size: 0.75rem;
 	}
 
 	.transit-link {
 		font-size: 0.7rem;
 		color: #3498db;
+		text-decoration: none;
+		border: 1px solid #b3d4fc;
+		border-radius: 3px;
+		padding: 0 3px;
 	}
 </style>

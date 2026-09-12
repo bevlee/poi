@@ -18,6 +18,47 @@ export async function fetchMatrix(apiKey, coordinates, profile = 'driving-car') 
 	return res.json();
 }
 
+export async function fetchDirections(apiKey, from, to, profile = 'driving-car') {
+	const url = `https://api.openrouteservice.org/v2/directions/${profile}/geojson`;
+	const res = await fetch(url, {
+		method: 'POST',
+		headers: {
+			'Authorization': apiKey,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({
+			coordinates: [
+				[from.longitude, from.latitude],
+				[to.longitude, to.latitude]
+			]
+		})
+	});
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`ORS error ${res.status}: ${text}`);
+	}
+	const data = await res.json();
+	const feature = data.features[0];
+	return {
+		geometry: feature.geometry,
+		duration: feature.properties.summary.duration,
+		distance: feature.properties.summary.distance
+	};
+}
+
+export async function fetchRoutesFromPlace(apiKey, origin, destinations, profile = 'driving-car') {
+	const results = [];
+	for (const dest of destinations) {
+		try {
+			const route = await fetchDirections(apiKey, origin, dest, profile);
+			results.push({ destination: dest, ...route });
+		} catch (e) {
+			results.push({ destination: dest, error: e.message });
+		}
+	}
+	return results;
+}
+
 export function formatDuration(seconds) {
 	if (seconds == null) return '—';
 	const mins = Math.round(seconds / 60);
