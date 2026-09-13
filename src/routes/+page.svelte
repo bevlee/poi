@@ -13,9 +13,53 @@
 		mounted = true;
 		const firstNonCandidate = store.groups.find(g => g.id !== store.candidateGroupId);
 		selectedGroupId = firstNonCandidate?.id ?? store.groups[0]?.id ?? '';
+
+		const cache = loadComparisonCache();
+		if (cache && isCacheValid(cache)) {
+			candidateRoutes = cache.routes;
+			compareProfile = cache.profile;
+			activeCandidateId = cache.activeCandidateId ?? Object.keys(cache.routes)[0] ?? null;
+			comparing = true;
+		}
 	});
 
-	// Search
+	// --- Comparison cache ---
+	const CACHE_KEY = 'poi-comparison-cache';
+
+	function loadComparisonCache() {
+		try {
+			const raw = localStorage.getItem(CACHE_KEY);
+			if (raw) return JSON.parse(raw);
+		} catch {}
+		return null;
+	}
+
+	function saveComparisonCache(data) {
+		try {
+			localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+		} catch {}
+	}
+
+	function isCacheValid(cache) {
+		if (!cache?.routes || !cache.candidateGroupId) return false;
+		if (cache.candidateGroupId !== store.candidateGroupId) return false;
+		const currentCandidateIds = getCandidates().map(c => c.id).sort().join(',');
+		const cachedCandidateIds = (cache.candidateIds ?? []).sort().join(',');
+		if (currentCandidateIds !== cachedCandidateIds) return false;
+		const currentDestIds = getDestinations().map(d => d.id).sort().join(',');
+		const cachedDestIds = (cache.destinationIds ?? []).sort().join(',');
+		if (currentDestIds !== cachedDestIds) return false;
+		return true;
+	}
+
+	function checkCacheStale() {
+		if (!comparing) return false;
+		const cache = loadComparisonCache();
+		if (!cache) return true;
+		return !isCacheValid(cache);
+	}
+
+	// --- Search ---
 	let searchQuery = $state('');
 	let searchResults = $state([]);
 	let searching = $state(false);
@@ -50,7 +94,7 @@
 		searchQuery = '';
 	}
 
-	// Group management
+	// --- Groups ---
 	let newGroupName = $state('');
 	let newGroupColour = $state('#e67e22');
 
@@ -60,7 +104,7 @@
 		newGroupName = '';
 	}
 
-	// Place editing
+	// --- Place editing ---
 	let editingPlaceId = $state(null);
 	let editName = $state('');
 	let editGroupId = $state('');
@@ -76,7 +120,7 @@
 		editingPlaceId = null;
 	}
 
-	// Compare mode
+	// --- Compare mode ---
 	let compareProfile = $state('driving-car');
 	let comparing = $state(false);
 	let compareLoading = $state(false);
@@ -106,6 +150,15 @@
 		if (candidates.length === 0) { compareError = 'No candidates to compare.'; return; }
 		if (destinations.length === 0) { compareError = 'No places of interest to compare against.'; return; }
 
+		// Check cache first
+		const cache = loadComparisonCache();
+		if (cache && isCacheValid(cache) && cache.profile === compareProfile) {
+			candidateRoutes = cache.routes;
+			activeCandidateId = cache.activeCandidateId ?? candidates[0].id;
+			comparing = true;
+			return;
+		}
+
 		comparing = true;
 		compareLoading = true;
 		compareError = '';
@@ -116,7 +169,6 @@
 			const results = await Promise.all(
 				candidates.map(async (candidate) => {
 					const routes = await fetchRoutesFromPlace(store.orsApiKey, candidate, destinations, compareProfile);
-					routes.sort((a, b) => (a.duration ?? Infinity) - (b.duration ?? Infinity));
 					return { candidateId: candidate.id, routes };
 				})
 			);
@@ -125,6 +177,60 @@
 				routeMap[candidateId] = routes;
 			}
 			candidateRoutes = routeMap;
+
+			saveComparisonCache({
+				profile: compareProfile,
+				candidateGroupId: store.candidateGroupId,
+				candidateIds: candidates.map(c => c.id),
+				destinationIds: destinations.map(d => d.id),
+				routes: routeMap,
+				activeCandidateId: candidates[0].id,
+				savedAt: Date.now()
+			});
+		} catch (e) {
+			compareError = e.message;
+		}
+		compareLoading = false;
+	}
+
+	async function refreshCompare() {
+		try { localStorage.removeItem(CACHE_KEY); } catch {}
+		candidateRoutes = {};
+		compareLoading = true;
+		compareError = '';
+
+		const candidates = getCandidates();
+		const destinations = getDestinations();
+
+		if (candidates.length === 0 || destinations.length === 0) {
+			exitCompare();
+			return;
+		}
+
+		activeCandidateId = activeCandidateId ?? candidates[0].id;
+
+		try {
+			const results = await Promise.all(
+				candidates.map(async (candidate) => {
+					const routes = await fetchRoutesFromPlace(store.orsApiKey, candidate, destinations, compareProfile);
+					return { candidateId: candidate.id, routes };
+				})
+			);
+			const routeMap = {};
+			for (const { candidateId, routes } of results) {
+				routeMap[candidateId] = routes;
+			}
+			candidateRoutes = routeMap;
+
+			saveComparisonCache({
+				profile: compareProfile,
+				candidateGroupId: store.candidateGroupId,
+				candidateIds: candidates.map(c => c.id),
+				destinationIds: destinations.map(d => d.id),
+				routes: routeMap,
+				activeCandidateId,
+				savedAt: Date.now()
+			});
 		} catch (e) {
 			compareError = e.message;
 		}
@@ -138,6 +244,15 @@
 		compareError = '';
 	}
 
+	function setActiveCandidate(id) {
+		activeCandidateId = id;
+		const cache = loadComparisonCache();
+		if (cache) {
+			cache.activeCandidateId = id;
+			saveComparisonCache(cache);
+		}
+	}
+
 	function getActiveRoutes() {
 		if (!activeCandidateId) return [];
 		return candidateRoutes[activeCandidateId] ?? [];
@@ -147,7 +262,7 @@
 		return store?.places.find(p => p.id === activeCandidateId) ?? null;
 	}
 
-	// Summary table helpers
+	// --- Summary table helpers ---
 	function routeFor(candidateId, destId) {
 		return candidateRoutes[candidateId]?.find(r => r.destination.id === destId) ?? null;
 	}
@@ -183,7 +298,7 @@
 		return min === Infinity ? null : min;
 	}
 
-	// Export / Import
+	// --- Export / Import ---
 	let showSettings = $state(false);
 
 	function exportData() {
@@ -334,189 +449,185 @@
 					</div>
 				</div>
 
-				<!-- Places / Compare panel -->
-				{#if !comparing}
-					{@const candidates = getCandidates()}
-					{@const destinations = getDestinations()}
-					{@const nonCandidatePlaces = store.places.filter(p => p.groupId !== store.candidateGroupId)}
-					{@const candidateGroup = store.groups.find(g => g.id === store.candidateGroupId)}
-					<div class="panel">
+				<!-- Places panel -->
+				{#if store}
+				{@const candidates = getCandidates()}
+				{@const destinations = getDestinations()}
+				{@const nonCandidatePlaces = store.places.filter(p => p.groupId !== store.candidateGroupId)}
+				{@const candidateGroup = store.groups.find(g => g.id === store.candidateGroupId)}
+				<div class="panel">
+					<h2>Places ({store.places.length})</h2>
 
-						<div class="panel-header-row">
-							<h2>Places ({store.places.length})</h2>
-							<select class="profile-sel" bind:value={compareProfile}>
-								<option value="driving-car">Driving</option>
-								<option value="foot-walking">Walking</option>
-								<option value="cycling-regular">Cycling</option>
-							</select>
+					{#if store.places.length === 0}
+						<div class="guidance">
+							<div class="step"><span class="step-num">1</span> Search and add places of interest (work, gym, friends)</div>
+							<div class="step"><span class="step-num">2</span> Add {candidateGroup?.name?.toLowerCase() ?? 'candidates'} to compare</div>
+							<div class="step"><span class="step-num">3</span> Hit Compare to see travel times</div>
 						</div>
+					{:else if nonCandidatePlaces.length === 0}
+						<p class="guidance-hint">Add places of interest (work, gym, etc.) to compare your {candidateGroup?.name?.toLowerCase() ?? 'candidates'} against.</p>
+					{:else if candidates.length === 0}
+						<p class="guidance-hint">Add some {candidateGroup?.name?.toLowerCase() ?? 'candidates'} to compare against your places of interest.</p>
+					{/if}
 
-						<!-- Guidance -->
-						{#if store.places.length === 0}
-							<div class="guidance">
-								<div class="step"><span class="step-num">1</span> Search and add places of interest (work, gym, friends)</div>
-								<div class="step"><span class="step-num">2</span> Add {candidateGroup?.name?.toLowerCase() ?? 'candidates'} to compare</div>
-								<div class="step"><span class="step-num">3</span> Hit Compare to see travel times</div>
-							</div>
-						{:else if nonCandidatePlaces.length === 0}
-							<p class="guidance-hint">Add places of interest (work, gym, etc.) to compare your {candidateGroup?.name?.toLowerCase() ?? 'candidates'} against.</p>
-						{:else if candidates.length === 0}
-							<p class="guidance-hint">Add some {candidateGroup?.name?.toLowerCase() ?? 'candidates'} to compare against your places of interest.</p>
-						{/if}
+					{#if nonCandidatePlaces.length > 0}
+						<h3 class="section-label">Places of Interest</h3>
+						{#each nonCandidatePlaces as place}
+							{@render placeRow(place)}
+						{/each}
+					{/if}
 
-						<!-- Places of Interest -->
-						{#if nonCandidatePlaces.length > 0}
-							<h3 class="section-label">Places of Interest</h3>
-							{#each nonCandidatePlaces as place}
-								{@render placeRow(place)}
-							{/each}
-						{/if}
+					{#if candidates.length > 0}
+						<h3 class="section-label">{candidateGroup?.name ?? 'Candidates'}</h3>
+						{#each candidates as place}
+							{@render placeRow(place)}
+						{/each}
+					{/if}
 
-						<!-- Candidates -->
-						{#if candidates.length > 0}
-							<h3 class="section-label">{candidateGroup?.name ?? 'Candidates'}</h3>
-							{#each candidates as place}
-								{@render placeRow(place)}
-							{/each}
-						{/if}
-
-						<!-- Compare button -->
-						{#if candidates.length > 0 && destinations.length > 0}
-							<button class="compare-all-btn" onclick={compareAll} disabled={compareLoading}>
-								{compareLoading ? 'Comparing...' : `Compare ${candidates.length} ${candidateGroup?.name ?? 'Candidates'}`}
-							</button>
-						{/if}
-					</div>
-				{:else}
-					{@const candidates = getCandidates()}
-					{@const candidateGroup = store.groups.find(g => g.id === store.candidateGroupId)}
-					{@const activeCandidate = getActiveCandidate()}
-					{@const activeRoutes = getActiveRoutes()}
-					<!-- Compare mode -->
-					<div class="panel compare-panel">
-
-						<div class="compare-header">
-							<h2>{candidateGroup?.name ?? 'Candidates'}</h2>
-							<button class="small-btn exit-btn" onclick={exitCompare}>Exit</button>
-						</div>
-
-						<div class="candidate-tabs">
-							{#each candidates as c}
-								{@const cGroup = store.groups.find(g => g.id === c.groupId)}
-								<button
-									class="candidate-tab"
-									class:active={c.id === activeCandidateId}
-									style:border-color={c.id === activeCandidateId ? cGroup?.colour ?? '#e74c3c' : 'transparent'}
-									onclick={() => activeCandidateId = c.id}
-								>
-									{c.name}
-								</button>
-							{/each}
-						</div>
-
-						{#if compareLoading}
-							<p class="loading">Fetching routes...</p>
-						{:else if activeRoutes.length > 0}
-							<div class="route-list">
-								{#each activeRoutes as route}
-									{@const destGroup = store.groups.find(g => g.id === route.destination.groupId)}
-									<div class="route-item">
-										<span class="colour-dot" style:background={destGroup?.colour ?? '#999'}></span>
-										<span class="route-dest">{route.destination.name}</span>
-										{#if route.error}
-											<span class="route-error">Error</span>
-										{:else}
-											<span class="route-time">{formatDuration(route.duration)}</span>
-											<span class="route-dist">{formatDistance(route.distance)}</span>
-										{/if}
-										{#if activeCandidate && !route.error}
-											<a
-												class="transit-link"
-												href={googleMapsTransitUrl(activeCandidate.latitude, activeCandidate.longitude, route.destination.latitude, route.destination.longitude)}
-												target="_blank"
-												rel="noopener"
-												title="Google Maps transit"
-											>T</a>
-										{/if}
-									</div>
-								{/each}
-							</div>
-						{/if}
-					</div>
+					{#if !comparing && candidates.length > 0 && destinations.length > 0}
+						<button class="compare-all-btn" onclick={compareAll} disabled={compareLoading}>
+							{compareLoading ? 'Comparing...' : `Compare ${candidates.length} ${candidateGroup?.name ?? 'Candidates'}`}
+						</button>
+					{:else if comparing}
+						<button class="exit-compare-btn" onclick={exitCompare}>Exit Comparison</button>
+					{/if}
+				</div>
 				{/if}
 			</div>
 
-			<div class="map-area">
-				<Map
-					places={store.places}
-					groups={store.groups}
-					routes={comparing ? getActiveRoutes() : []}
-					focusPlaceId={comparing ? activeCandidateId : null}
-					bind:this={mapComponent}
-				/>
-			</div>
-		</div>
+			<!-- Content area: table + map -->
+			<div class="content-area" class:has-table={comparing && !compareLoading && Object.keys(candidateRoutes).length > 0}>
 
-		<!-- Comparison summary table -->
-		{#if comparing && !compareLoading && Object.keys(candidateRoutes).length > 0}
-			{@const candidates = getCandidates()}
-			{@const destinations = getDestinations()}
-			{@const candidateGroup = store.groups.find(g => g.id === store.candidateGroupId)}
-			{@const minT = minTotalDuration()}
+				{#if comparing}
+					{#if compareLoading}
+						<div class="loading-panel">Fetching routes for all candidates...</div>
+					{:else if Object.keys(candidateRoutes).length > 0}
+						{@const tableCandidates = getCandidates()}
+						{@const tableDestinations = getDestinations()}
+						{@const minT = minTotalDuration()}
+						{@const stale = checkCacheStale()}
 
-			<div class="summary-section">
-				<h2>Comparison Summary</h2>
-				<div class="table-scroll">
-					<table class="summary-table">
-						<thead>
-							<tr>
-								<th class="dest-col">Destination</th>
-								{#each candidates as c}
-									<th class:active-col={c.id === activeCandidateId}>{c.name}</th>
-								{/each}
-							</tr>
-						</thead>
-						<tbody>
-							{#each destinations as dest}
-								{@const minDur = minDurationForDest(dest.id)}
-								{@const destGroup = store.groups.find(g => g.id === dest.groupId)}
-								<tr>
-									<td class="dest-col">
-										<span class="colour-dot" style:background={destGroup?.colour ?? '#999'}></span>
-										{dest.name}
-									</td>
-									{#each candidates as c}
-										{@const route = routeFor(c.id, dest.id)}
-										{@const dur = route?.duration}
-										{@const isBest = dur != null && minDur != null && dur <= minDur}
-										<td class:best={isBest} class:active-col={c.id === activeCandidateId}>
-											{#if route?.error}
-												<span class="route-error">Err</span>
-											{:else}
-												<div class="cell-time">{formatDuration(dur)}</div>
-												<div class="cell-dist">{formatDistance(route?.distance)}</div>
-											{/if}
-										</td>
-									{/each}
-								</tr>
-							{/each}
-						</tbody>
-						<tfoot>
-							<tr class="total-row">
-								<td class="dest-col"><strong>Total</strong></td>
-								{#each candidates as c}
-									{@const total = totalDuration(c.id)}
-									{@const isBestTotal = total != null && minT != null && total <= minT}
-									<td class:best={isBestTotal} class:active-col={c.id === activeCandidateId}>
-										<strong>{formatDuration(total)}</strong>
-									</td>
-								{/each}
-							</tr>
-						</tfoot>
-					</table>
+						<div class="table-panel">
+							<div class="table-toolbar">
+								<h2>Comparison</h2>
+								<div class="table-controls">
+									<select class="profile-sel" bind:value={compareProfile}>
+										<option value="driving-car">Driving</option>
+										<option value="foot-walking">Walking</option>
+										<option value="cycling-regular">Cycling</option>
+									</select>
+									<button class="small-btn refresh-btn" onclick={refreshCompare} disabled={compareLoading}>Refresh</button>
+								</div>
+							</div>
+
+							{#if stale}
+								<div class="stale-notice">
+									Places changed since last comparison.
+									<button class="small-btn refresh-btn" onclick={refreshCompare}>Refresh</button>
+								</div>
+							{/if}
+
+							<div class="table-scroll">
+								<table class="summary-table">
+									<thead>
+										<tr>
+											<th class="dest-th">Destination</th>
+											{#each tableCandidates as c}
+												<th
+													class="candidate-th"
+													class:active-col={c.id === activeCandidateId}
+													onclick={() => setActiveCandidate(c.id)}
+												>
+													{c.name}
+													{#if c.id === activeCandidateId}
+														<span class="map-indicator">on map</span>
+													{/if}
+												</th>
+											{/each}
+										</tr>
+									</thead>
+									<tbody>
+										{#each tableDestinations as dest}
+											{@const minDur = minDurationForDest(dest.id)}
+											{@const destGroup = store.groups.find(g => g.id === dest.groupId)}
+											<tr>
+												<td class="dest-td">
+													<span class="colour-dot" style:background={destGroup?.colour ?? '#999'}></span>
+													<span class="dest-name">{dest.name}</span>
+												</td>
+												{#each tableCandidates as c}
+													{@const route = routeFor(c.id, dest.id)}
+													{@const dur = route?.duration}
+													{@const isBest = dur != null && minDur != null && dur <= minDur && tableCandidates.length > 1}
+													<td
+														class="data-cell"
+														class:best={isBest}
+														class:active-col={c.id === activeCandidateId}
+														onclick={() => setActiveCandidate(c.id)}
+													>
+														{#if route?.error}
+															<span class="cell-error">Error</span>
+														{:else}
+															<span class="cell-time">{formatDuration(dur)}</span>
+															<span class="cell-dist">{formatDistance(route?.distance)}</span>
+														{/if}
+													</td>
+												{/each}
+											</tr>
+										{/each}
+									</tbody>
+									<tfoot>
+										<tr class="total-row">
+											<td class="dest-td"><strong>Total</strong></td>
+											{#each tableCandidates as c}
+												{@const total = totalDuration(c.id)}
+												{@const isBestTotal = total != null && minT != null && total <= minT && tableCandidates.length > 1}
+												<td
+													class="data-cell"
+													class:best={isBestTotal}
+													class:active-col={c.id === activeCandidateId}
+													onclick={() => setActiveCandidate(c.id)}
+												>
+													<strong class="cell-time">{formatDuration(total)}</strong>
+												</td>
+											{/each}
+										</tr>
+									</tfoot>
+								</table>
+							</div>
+						</div>
+					{/if}
+				{/if}
+
+				<!-- Map -->
+				{#if comparing && !compareLoading && Object.keys(candidateRoutes).length > 0}
+					{@const mapCandidate = getActiveCandidate()}
+					<div class="map-label-bar">
+						{#each getCandidates() as c}
+							{@const cGroup = store.groups.find(g => g.id === c.groupId)}
+							<button
+								class="map-tab"
+								class:active={c.id === activeCandidateId}
+								style:border-color={c.id === activeCandidateId ? cGroup?.colour ?? '#e74c3c' : 'transparent'}
+								onclick={() => setActiveCandidate(c.id)}
+							>
+								{c.name}
+							</button>
+						{/each}
+					</div>
+				{/if}
+
+				<div class="map-area" class:compact={comparing && !compareLoading && Object.keys(candidateRoutes).length > 0}>
+					<Map
+						places={store.places}
+						groups={store.groups}
+						routes={comparing ? getActiveRoutes() : []}
+						focusPlaceId={comparing ? activeCandidateId : null}
+						bind:this={mapComponent}
+					/>
 				</div>
 			</div>
-		{/if}
+		</div>
 
 		{#if compareError}
 			<div class="error">{compareError}</div>
@@ -549,10 +660,7 @@
 	h2 { margin: 0 0 0.5rem; font-size: 1rem; }
 	h3 { margin: 0; font-size: 0.85rem; }
 
-	.settings-btn {
-		padding: 0.4rem 1rem;
-		cursor: pointer;
-	}
+	.settings-btn { padding: 0.4rem 1rem; cursor: pointer; }
 
 	.settings-panel {
 		background: white;
@@ -569,16 +677,8 @@
 		margin-bottom: 0.5rem;
 	}
 
-	.setting-row label {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.setting-row input[type="text"] {
-		width: 300px;
-		padding: 0.3rem 0.5rem;
-	}
+	.setting-row label { display: flex; align-items: center; gap: 0.5rem; }
+	.setting-row input[type="text"] { width: 300px; padding: 0.3rem 0.5rem; }
 
 	.file-label {
 		padding: 0.4rem 1rem;
@@ -589,18 +689,8 @@
 	}
 
 	/* Search */
-	.search-bar {
-		display: flex;
-		gap: 0.5rem;
-		margin-bottom: 0.5rem;
-	}
-
-	.search-bar input[type="text"] {
-		flex: 1;
-		padding: 0.5rem;
-		font-size: 1rem;
-	}
-
+	.search-bar { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+	.search-bar input[type="text"] { flex: 1; padding: 0.5rem; font-size: 1rem; }
 	.search-bar select { padding: 0.5rem; }
 	.search-bar button { padding: 0.5rem 1.5rem; cursor: pointer; }
 
@@ -646,11 +736,19 @@
 	}
 
 	.sidebar {
-		width: 320px;
+		width: 300px;
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
+	}
+
+	.content-area {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		min-width: 0;
 	}
 
 	.panel {
@@ -660,12 +758,19 @@
 		padding: 0.75rem;
 	}
 
+	/* Map */
 	.map-area {
 		flex: 1;
 		min-height: 500px;
 		border-radius: 6px;
 		overflow: hidden;
 		border: 1px solid #ddd;
+	}
+
+	.map-area.compact {
+		flex: none;
+		min-height: 200px;
+		height: 300px;
 	}
 
 	/* Groups */
@@ -691,25 +796,9 @@
 		flex-shrink: 0;
 	}
 
-	.add-group {
-		display: flex;
-		gap: 0.3rem;
-		margin-top: 0.5rem;
-	}
-
-	.add-group input[type="text"] {
-		flex: 1;
-		padding: 0.3rem;
-		min-width: 0;
-	}
-
-	.add-group input[type="color"] {
-		width: 32px;
-		height: 28px;
-		padding: 0;
-		border: 1px solid #ccc;
-		cursor: pointer;
-	}
+	.add-group { display: flex; gap: 0.3rem; margin-top: 0.5rem; }
+	.add-group input[type="text"] { flex: 1; padding: 0.3rem; min-width: 0; }
+	.add-group input[type="color"] { width: 32px; height: 28px; padding: 0; border: 1px solid #ccc; cursor: pointer; }
 
 	.candidate-select {
 		margin-top: 0.6rem;
@@ -726,27 +815,9 @@
 		color: #555;
 	}
 
-	.candidate-select select {
-		flex: 1;
-		padding: 0.25rem;
-		font-size: 0.85rem;
-	}
+	.candidate-select select { flex: 1; padding: 0.25rem; font-size: 0.85rem; }
 
-	/* Places panel */
-	.panel-header-row {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: 0.5rem;
-	}
-
-	.panel-header-row h2 { margin: 0; }
-
-	.profile-sel {
-		padding: 0.2rem 0.3rem;
-		font-size: 0.8rem;
-	}
-
+	/* Places */
 	.guidance {
 		background: #f0f7ff;
 		border: 1px solid #c5ddf5;
@@ -800,7 +871,6 @@
 		border-bottom: 1px solid #eee;
 	}
 
-	/* Place rows */
 	.place-row {
 		display: flex;
 		align-items: center;
@@ -819,18 +889,9 @@
 		white-space: nowrap;
 	}
 
-	.place-group-label {
-		font-size: 0.7rem;
-		color: #999;
-		white-space: nowrap;
-	}
+	.place-group-label { font-size: 0.7rem; color: #999; white-space: nowrap; }
 
-	.edit-input {
-		flex: 1;
-		padding: 0.2rem;
-		font-size: 0.85rem;
-		min-width: 0;
-	}
+	.edit-input { flex: 1; padding: 0.2rem; font-size: 0.85rem; min-width: 0; }
 
 	.small-btn {
 		padding: 0.15rem 0.4rem;
@@ -843,7 +904,7 @@
 
 	.delete-btn { color: #c0392b; }
 
-	/* Compare all button */
+	/* Compare button */
 	.compare-all-btn {
 		display: block;
 		width: 100%;
@@ -856,134 +917,94 @@
 		border: none;
 		border-radius: 6px;
 		cursor: pointer;
-		transition: background 0.15s;
 	}
 
 	.compare-all-btn:hover:not(:disabled) { background: #1a6fa0; }
 	.compare-all-btn:disabled { opacity: 0.6; cursor: default; }
 
-	/* Compare panel */
-	.compare-panel {
-		border-color: #b3d4fc;
-		background: #f8fbff;
+	.exit-compare-btn {
+		display: block;
+		width: 100%;
+		margin-top: 0.75rem;
+		padding: 0.4rem 0.75rem;
+		font-size: 0.85rem;
+		color: #c0392b;
+		background: #fdecea;
+		border: 1px solid #e8a5a0;
+		border-radius: 6px;
+		cursor: pointer;
+		text-align: center;
 	}
 
-	.compare-header {
+	/* Loading */
+	.loading-panel {
+		background: white;
+		border: 1px solid #ddd;
+		border-radius: 6px;
+		padding: 1.5rem;
+		text-align: center;
+		color: #888;
+		font-size: 0.95rem;
+	}
+
+	/* Table panel */
+	.table-panel {
+		background: white;
+		border: 1px solid #ddd;
+		border-radius: 6px;
+		padding: 0.75rem;
+	}
+
+	.table-toolbar {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
 		margin-bottom: 0.5rem;
 	}
 
-	.compare-header h2 { margin: 0; }
+	.table-toolbar h2 { margin: 0; }
 
-	.exit-btn {
-		background: #fdecea;
-		border-color: #e8a5a0;
-		color: #c0392b;
-	}
-
-	/* Candidate tabs */
-	.candidate-tabs {
-		display: flex;
-		gap: 0.3rem;
-		margin-bottom: 0.6rem;
-		flex-wrap: wrap;
-	}
-
-	.candidate-tab {
-		padding: 0.35rem 0.7rem;
-		font-size: 0.82rem;
-		font-weight: 500;
-		background: white;
-		border: 2px solid transparent;
-		border-bottom-width: 3px;
-		border-radius: 4px 4px 0 0;
-		cursor: pointer;
-		color: #666;
-		transition: all 0.15s;
-	}
-
-	.candidate-tab:hover { background: #f0f0f0; }
-
-	.candidate-tab.active {
-		color: #333;
-		font-weight: 700;
-		background: white;
-	}
-
-	.loading {
-		color: #888;
-		font-size: 0.85rem;
-		margin: 0;
-	}
-
-	.route-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.3rem;
-	}
-
-	.route-item {
+	.table-controls {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		padding: 0.3rem 0;
-		font-size: 0.85rem;
-		border-bottom: 1px solid #e8eef4;
 	}
 
-	.route-item:last-child { border-bottom: none; }
+	.profile-sel { padding: 0.2rem 0.3rem; font-size: 0.8rem; }
 
-	.route-dest {
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+	.refresh-btn {
+		background: #e8f4fd;
+		border-color: #90c5e8;
+		color: #1a6fa0;
 	}
 
-	.route-time { font-weight: 700; white-space: nowrap; }
-	.route-dist { color: #888; font-size: 0.75rem; white-space: nowrap; }
-	.route-error { color: #c0392b; font-size: 0.75rem; }
-
-	.transit-link {
-		font-size: 0.7rem;
-		color: #3498db;
-		text-decoration: none;
-		border: 1px solid #b3d4fc;
-		border-radius: 3px;
-		padding: 0 3px;
+	.stale-notice {
+		background: #fef9e7;
+		border: 1px solid #f0e0a0;
+		border-radius: 4px;
+		padding: 0.4rem 0.6rem;
+		font-size: 0.82rem;
+		color: #856404;
+		margin-bottom: 0.5rem;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 	}
 
 	/* Summary table */
-	.summary-section {
-		background: white;
-		border: 1px solid #ddd;
-		border-radius: 6px;
-		padding: 0.75rem;
-		margin-bottom: 1rem;
-	}
-
-	.summary-section h2 {
-		margin-bottom: 0.6rem;
-	}
-
-	.table-scroll {
-		overflow-x: auto;
-	}
+	.table-scroll { overflow-x: auto; }
 
 	.summary-table {
 		width: 100%;
 		border-collapse: collapse;
-		font-size: 0.85rem;
+		font-size: 0.9rem;
 	}
 
 	.summary-table th,
 	.summary-table td {
-		padding: 0.45rem 0.6rem;
+		padding: 0.5rem 0.75rem;
 		text-align: left;
 		border-bottom: 1px solid #eee;
-		white-space: nowrap;
 	}
 
 	.summary-table thead th {
@@ -992,23 +1013,57 @@
 		border-bottom: 2px solid #ddd;
 	}
 
-	.summary-table .dest-col {
+	.candidate-th {
+		cursor: pointer;
+		user-select: none;
+		white-space: nowrap;
+		transition: background 0.1s;
+	}
+
+	.candidate-th:hover { background: #e8f4fd !important; }
+
+	.map-indicator {
+		display: inline-block;
+		font-size: 0.65rem;
+		font-weight: 400;
+		color: #1a6fa0;
+		margin-left: 0.3rem;
+		vertical-align: middle;
+	}
+
+	.dest-th { white-space: nowrap; }
+
+	.dest-td {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
+		white-space: nowrap;
 	}
 
-	.summary-table td.best {
+	.dest-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.data-cell {
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background 0.1s;
+	}
+
+	.data-cell:hover { background: #f0f0f0; }
+
+	.data-cell.best {
 		background: #e8f8e8;
 		font-weight: 600;
 	}
 
-	.summary-table td.active-col,
-	.summary-table th.active-col {
+	.data-cell.active-col,
+	.candidate-th.active-col {
 		background: #eef6ff;
 	}
 
-	.summary-table td.best.active-col {
+	.data-cell.best.active-col {
 		background: #d4f0d4;
 	}
 
@@ -1018,5 +1073,43 @@
 	}
 
 	.cell-time { font-weight: 600; }
-	.cell-dist { color: #999; font-size: 0.75rem; }
+	.cell-dist { color: #999; font-size: 0.75rem; margin-left: 0.3rem; }
+	.cell-error { color: #c0392b; font-size: 0.8rem; }
+
+	/* Map tabs */
+	.map-label-bar {
+		display: flex;
+		gap: 0.3rem;
+		padding: 0.4rem 0.5rem;
+		background: white;
+		border: 1px solid #ddd;
+		border-bottom: none;
+		border-radius: 6px 6px 0 0;
+	}
+
+	.map-tab {
+		padding: 0.3rem 0.6rem;
+		font-size: 0.8rem;
+		font-weight: 500;
+		background: #f5f5f5;
+		border: none;
+		border-bottom: 3px solid transparent;
+		border-radius: 4px 4px 0 0;
+		cursor: pointer;
+		color: #666;
+		transition: all 0.15s;
+	}
+
+	.map-tab:hover { background: #eee; }
+
+	.map-tab.active {
+		color: #333;
+		font-weight: 700;
+		background: white;
+	}
+
+	.content-area.has-table .map-area {
+		border-top-left-radius: 0;
+		border-top-right-radius: 0;
+	}
 </style>

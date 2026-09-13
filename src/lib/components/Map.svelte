@@ -9,6 +9,7 @@
 	let markers = [];
 	let routeLayers = [];
 	let L;
+	let resizeObserver;
 
 	onMount(async () => {
 		L = (await import('leaflet')).default;
@@ -23,11 +24,17 @@
 			map.on('click', (e) => onMapClick(e.latlng));
 		}
 
+		resizeObserver = new ResizeObserver(() => {
+			if (map) map.invalidateSize();
+		});
+		resizeObserver.observe(mapContainer);
+
 		updateMarkers();
 		updateRoutes();
 	});
 
 	onDestroy(() => {
+		if (resizeObserver) resizeObserver.disconnect();
 		if (map) map.remove();
 	});
 
