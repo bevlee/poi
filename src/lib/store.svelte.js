@@ -31,9 +31,12 @@ export function createStore() {
 	let places = $state(saved?.places ?? []);
 	let groups = $state(saved?.groups ?? structuredClone(DEFAULT_GROUPS));
 	let orsApiKey = $state(saved?.orsApiKey ?? '');
+	let candidateGroupId = $state(
+		saved?.candidateGroupId ?? groups.find(g => g.name === 'Houses')?.id ?? groups[0]?.id ?? null
+	);
 
 	function persist() {
-		saveData({ places, groups, orsApiKey });
+		saveData({ places, groups, orsApiKey, candidateGroupId });
 	}
 
 	return {
@@ -41,6 +44,12 @@ export function createStore() {
 		get groups() { return groups; },
 		get orsApiKey() { return orsApiKey; },
 		set orsApiKey(v) { orsApiKey = v; persist(); },
+		get candidateGroupId() { return candidateGroupId; },
+
+		setCandidateGroup(id) {
+			candidateGroupId = id;
+			persist();
+		},
 
 		addPlace(place) {
 			places.push({ id: createId(), ...place });
@@ -76,6 +85,9 @@ export function createStore() {
 		deleteGroup(id) {
 			groups = groups.filter(g => g.id !== id);
 			places = places.filter(p => p.groupId !== id);
+			if (candidateGroupId === id) {
+				candidateGroupId = groups[0]?.id ?? null;
+			}
 			persist();
 		},
 
@@ -88,7 +100,7 @@ export function createStore() {
 		},
 
 		exportData() {
-			return JSON.stringify({ places, groups, orsApiKey }, null, 2);
+			return JSON.stringify({ places, groups, orsApiKey, candidateGroupId }, null, 2);
 		},
 
 		importData(json) {
@@ -96,6 +108,7 @@ export function createStore() {
 			if (data.places) places = data.places;
 			if (data.groups) groups = data.groups;
 			if (data.orsApiKey !== undefined) orsApiKey = data.orsApiKey;
+			if (data.candidateGroupId !== undefined) candidateGroupId = data.candidateGroupId;
 			persist();
 		}
 	};
